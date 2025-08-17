@@ -534,7 +534,8 @@ class SchemaGenerator:
             "$schema": "http://json-schema.org/draft-2020-12/schema#",
             "type": "object",
             "properties": {},
-            "required": []
+            "required": [],
+            "additionalProperties": False  # Top-level schema NEVER allows additional properties
         }
         
         for field_name, analysis in field_analysis.items():
@@ -809,8 +810,7 @@ class SchemaGenerator:
         """Generate schema for an object within an array."""
         schema = {
             "type": "object",
-            "properties": {},
-            "additionalProperties": True
+            "properties": {}
         }
         
         # Generate schemas for each field in the object
@@ -822,6 +822,19 @@ class SchemaGenerator:
             # Generate schema for this field
             field_schema = self._generate_nested_field_schema(field_types, field_patterns, field_constraints)
             schema["properties"][field_name] = field_schema
+        
+        # Analyze if this array object needs additionalProperties
+        needs_additional = self._analyze_array_object_additional_properties_needed(item_schema_info)
+        if needs_additional:
+            schema["additionalProperties"] = True
+            # Add warning in description
+            mixed_fields = []
+            for field_name in item_schema_info['fields']:
+                field_types = item_schema_info['field_types'].get(field_name, set())
+                if len(field_types) > 1:
+                    mixed_fields.append(f"{field_name}({', '.join(field_types)})")
+            
+            schema["description"] = f"⚠️ WARNING: Array item allows additional properties due to mixed types in fields: {', '.join(mixed_fields)}. Consider defining explicit field schemas for better validation."
         
         return schema
     
@@ -841,7 +854,13 @@ class SchemaGenerator:
             elif item_type == 'bool':
                 return {"type": "boolean"}
             elif item_type == 'dict':
-                return {"type": "object", "additionalProperties": True}
+                # For dict items, analyze if they need additionalProperties
+                needs_additional = self._analyze_dict_item_additional_properties_needed(array_structure)
+                schema = {"type": "object"}
+                if needs_additional:
+                    schema["additionalProperties"] = True
+                    schema["description"] = "⚠️ WARNING: Array dict item allows additional properties due to complex structure. Consider defining explicit field schemas."
+                return schema
             elif item_type == 'list':
                 return {"type": "array", "items": {}}
             else:
@@ -859,7 +878,13 @@ class SchemaGenerator:
                 elif item_type == 'bool':
                     type_schemas.append({"type": "boolean"})
                 elif item_type == 'dict':
-                    type_schemas.append({"type": "object", "additionalProperties": True})
+                    # For dict items, analyze if they need additionalProperties
+                    needs_additional = self._analyze_dict_item_additional_properties_needed(array_structure)
+                    schema = {"type": "object"}
+                    if needs_additional:
+                        schema["additionalProperties"] = True
+                        schema["description"] = "⚠️ WARNING: Array dict item allows additional properties due to complex structure. Consider defining explicit field schemas."
+                    type_schemas.append(schema)
                 elif item_type == 'list':
                     type_schemas.append({"type": "array", "items": {}})
                 else:
@@ -885,14 +910,13 @@ class SchemaGenerator:
         if 'nested_structure' not in analysis:
             return {
                 "type": "object",
-                "additionalProperties": True
+                "additionalProperties": False  # No additional properties if we don't know the structure
             }
         
         nested = analysis['nested_structure']
         schema = {
             "type": "object",
-            "properties": {},
-            "additionalProperties": True
+            "properties": {}
         }
         
         # Generate schemas for each field in the nested object
@@ -904,6 +928,19 @@ class SchemaGenerator:
             # Generate schema for this field
             field_schema = self._generate_nested_field_schema(field_types, field_patterns, field_constraints)
             schema["properties"][field_name] = field_schema
+        
+        # Analyze if this nested object needs additionalProperties
+        needs_additional = self._analyze_nested_additional_properties_needed(analysis)
+        if needs_additional:
+            schema["additionalProperties"] = True
+            # Add warning in description
+            mixed_fields = []
+            for field_name in nested['fields']:
+                field_types = nested['field_types'].get(field_name, set())
+                if len(field_types) > 1:
+                    mixed_fields.append(f"{field_name}({', '.join(field_types)})")
+            
+            schema["description"] = f"⚠️ WARNING: This object allows additional properties due to mixed types in fields: {', '.join(mixed_fields)}. Consider defining explicit field schemas for better validation."
         
         return schema
     
@@ -1037,6 +1074,144 @@ class SchemaGenerator:
                     schema["maximum"] = max_value + expansion
         
         return schema
+    
+    def _analyze_additional_properties_needed(self, field_analysis: Dict[str, Dict[str, Any]]) -> bool:
+        """
+        Analyze if the schema needs additionalProperties based on field analysis.
+        
+        Args:
+            field_analysis: Analysis of all fields
+            
+        Returns:
+            True if additionalProperties should be allowed
+        """
+        # Check if we have mixed types or complex nested structures
+        for field_name, analysis in field_analysis.items():
+            # If any field has mixed types, we might need additionalProperties
+            if analysis.get('is_mixed', False) or len(analysis['types']) > 1:
+                return True
+            
+            # If any field is an object with unknown structure, we might need additionalProperties
+            if 'dict' in analysis['types'] and 'nested_structure' not in analysis:
+                return True
+            
+            # If any field has high null percentage, it might indicate flexible structure
+            if analysis.get('null_percentage', 0) > 0.5:
+                return True
+        
+        # If we have very few fields and they're all well-defined, don't allow additionalProperties
+        if len(field_analysis) <= 3:
+            all_well_defined = True
+            for analysis in field_analysis.values():
+                if len(analysis['types']) > 1 or analysis.get('is_mixed', False):
+                    all_well_defined = False
+                    break
+            if all_well_defined:
+                return False
+        
+        # Default to allowing additionalProperties for flexibility
+        return True
+    
+    def _analyze_nested_additional_properties_needed(self, analysis: Dict[str, Any]) -> bool:
+        """
+        Analyze if a nested object needs additionalProperties.
+        This is very restrictive - only allows additionalProperties when absolutely necessary.
+        
+        Args:
+            analysis: Analysis of the nested object
+            
+        Returns:
+            True if additionalProperties should be allowed
+        """
+        if 'nested_structure' not in analysis:
+            return False
+        
+        nested = analysis['nested_structure']
+        
+        # Only allow additionalProperties if we have mixed types in multiple fields
+        mixed_type_fields = 0
+        for field_name in nested['fields']:
+            field_types = nested['field_types'].get(field_name, set())
+            if len(field_types) > 1:
+                mixed_type_fields += 1
+        
+        # Only allow additionalProperties if more than 50% of fields have mixed types
+        if mixed_type_fields > len(nested['fields']) * 0.5:
+            return True
+        
+        # Default to not allowing additionalProperties for nested objects
+        return False
+    
+    def _analyze_array_object_additional_properties_needed(self, item_schema_info: Dict[str, Any]) -> bool:
+        """
+        Analyze if an array object needs additionalProperties.
+        This is very restrictive - only allows additionalProperties when absolutely necessary.
+        
+        Args:
+            item_schema_info: Analysis of the array item object
+            
+        Returns:
+            True if additionalProperties should be allowed
+        """
+        # Only allow additionalProperties if we have mixed types in multiple fields
+        mixed_type_fields = 0
+        for field_name in item_schema_info['fields']:
+            field_types = item_schema_info['field_types'].get(field_name, set())
+            if len(field_types) > 1:
+                mixed_type_fields += 1
+        
+        # Only allow additionalProperties if more than 50% of fields have mixed types
+        if mixed_type_fields > len(item_schema_info['fields']) * 0.5:
+            return True
+        
+        # Default to not allowing additionalProperties for array objects
+        return False
+    
+    def _analyze_dict_item_additional_properties_needed(self, array_structure: Dict[str, Any]) -> bool:
+        """
+        Analyze if dict items in arrays need additionalProperties.
+        
+        Args:
+            array_structure: Analysis of the array structure
+            
+        Returns:
+            True if additionalProperties should be allowed
+        """
+        # If we have multiple different object schemas, allow additionalProperties
+        if len(array_structure.get('item_schemas', {})) > 1:
+            return True
+        
+        # If we have nested objects but don't know their structure well, allow additionalProperties
+        if array_structure.get('nested_objects', False) and not array_structure.get('item_schemas'):
+            return True
+        
+        # Default to not allowing additionalProperties for dict items
+        return False
+    
+    def _analyze_dict_type_additional_properties_needed(self, analysis: Dict[str, Any]) -> bool:
+        """
+        Analyze if a dict type field needs additionalProperties.
+        
+        Args:
+            analysis: Analysis of the field
+            
+        Returns:
+            True if additionalProperties should be allowed
+        """
+        # If we have nested structure analysis, use that to decide
+        if 'nested_structure' in analysis:
+            return self._analyze_nested_additional_properties_needed(analysis)
+        
+        # If we have mixed types, allow additionalProperties
+        if analysis.get('is_mixed', False) or len(analysis['types']) > 1:
+            return True
+        
+        # If we have high null percentage, allow additionalProperties
+        if analysis.get('null_percentage', 0) > 0.3:
+            return True
+        
+        # Default to not allowing additionalProperties for dict types
+        return False
     
     def _validate_schema(self, schema: Dict[str, Any], data: List[Dict[str, Any]]) -> None:
         """
@@ -1223,7 +1398,13 @@ class SchemaGenerator:
             if 'list' in analysis['types']:
                 type_options.append({"type": "array", "items": {}})
             if 'dict' in analysis['types']:
-                type_options.append({"type": "object", "additionalProperties": True})
+                # For dict types, analyze if they need additionalProperties
+                needs_additional = self._analyze_dict_type_additional_properties_needed(analysis)
+                schema = {"type": "object"}
+                if needs_additional:
+                    schema["additionalProperties"] = True
+                    schema["description"] = "⚠️ WARNING: Object allows additional properties due to mixed content. Consider defining explicit field schemas."
+                type_options.append(schema)
             
             # Always allow null for flexibility
             type_options.append({"type": "null"})
@@ -1444,7 +1625,7 @@ class SchemaGenerator:
             "type": "object",
             "properties": {},
             "required": [],
-            "additionalProperties": False,  # No extra fields allowed
+            "additionalProperties": False,  # Top-level schema NEVER allows additional properties
             "description": f"Smart hardened schema with intelligent binary and mixed type handling (max depth: {max_depth})"
         }
         
@@ -1948,10 +2129,13 @@ class SchemaGenerator:
                 "minItems": 0
             })
         if 'dict' in analysis['types']:
-            type_options.append({
-                "type": "object",
-                "additionalProperties": True
-            })
+            # For dict types, analyze if they need additionalProperties
+            needs_additional = self._analyze_dict_type_additional_properties_needed(analysis)
+            schema = {"type": "object"}
+            if needs_additional:
+                schema["additionalProperties"] = True
+                schema["description"] = "⚠️ WARNING: Object allows additional properties due to mixed content. Consider defining explicit field schemas."
+            type_options.append(schema)
         
         # Always allow null for flexibility
         type_options.append({"type": "null"})
