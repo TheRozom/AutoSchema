@@ -22,8 +22,8 @@ class SchemaGenerator:
         No API keys or external dependencies required.
         """
         self.binary_patterns = [
-            r'^[A-Za-z0-9+/]*={0,2}$',  # Base64 pattern
-            r'^[A-Fa-f0-9]+$',  # Hex pattern
+            r'^[A-Za-z0-9+/]{20,}={0,2}$',  # Base64 pattern - must be at least 20 chars
+            r'^[A-Fa-f0-9]{32,}$',  # Hex pattern - must be at least 32 chars
         ]
         
         # Common binary file extensions and their MIME types
@@ -188,30 +188,46 @@ class SchemaGenerator:
             Dictionary mapping field names to their analysis
         """
         field_analysis = {}
+        total_objects = len(objects)
         
+        # First pass: collect all field names and initialize analysis
+        all_field_names = set()
         for obj in objects:
-            for field_name, field_value in obj.items():
-                if field_name not in field_analysis:
-                    field_analysis[field_name] = {
-                        'types': set(),
-                        'values': [],
-                        'null_count': 0,
-                        'total_count': 0,
-                        'min_length': None,
-                        'max_length': None,
-                        'min_value': None,
-                        'max_value': None,
-                        'patterns': set(),
-                        'is_binary': False,
-                        'is_mixed': False
-                    }
-                
+            all_field_names.update(obj.keys())
+        
+        for field_name in all_field_names:
+            field_analysis[field_name] = {
+                'types': set(),
+                'values': [],
+                'null_count': 0,
+                'total_count': 0,
+                'missing_count': 0,
+                'min_length': None,
+                'max_length': None,
+                'min_value': None,
+                'max_value': None,
+                'patterns': set(),
+                'is_binary': False,
+                'is_mixed': False
+            }
+        
+        # Second pass: analyze each object
+        for obj in objects:
+            for field_name in all_field_names:
                 analysis = field_analysis[field_name]
+                
+                if field_name not in obj:
+                    # Field is missing from this object
+                    analysis['missing_count'] += 1
+                    continue
+                
+                field_value = obj[field_name]
                 analysis['total_count'] += 1
                 analysis['values'].append(field_value)
                 
                 if field_value is None:
                     analysis['null_count'] += 1
+                    analysis['types'].add('NoneType')  # Track null as a type
                     continue
                 
                 # Analyze type
@@ -233,7 +249,7 @@ class SchemaGenerator:
         
         # Post-process analysis
         for field_name, analysis in field_analysis.items():
-            self._post_process_field_analysis(analysis)
+            self._post_process_field_analysis(analysis, total_objects)
         
         return field_analysis
     
@@ -288,32 +304,53 @@ class SchemaGenerator:
         # Could be extended to analyze nested structure
         pass
     
-    def _post_process_field_analysis(self, analysis: Dict[str, Any]) -> None:
+    def _post_process_field_analysis(self, analysis: Dict[str, Any], total_objects: int) -> None:
         """Post-process field analysis to determine final characteristics."""
         # Check if field has mixed types
         if len(analysis['types']) > 1:
             analysis['is_mixed'] = True
         
-        # Determine if field is required (not null in any object)
-        analysis['required'] = analysis['null_count'] == 0
+        # Determine if field is required (present in all objects and never null)
+        # A field is required if it appears in all objects AND is never null when present
+        analysis['required'] = (analysis['missing_count'] == 0 and analysis['null_count'] == 0)
         
         # Calculate null percentage
         analysis['null_percentage'] = analysis['null_count'] / analysis['total_count'] if analysis['total_count'] > 0 else 0
+        
+        # Calculate presence percentage
+        analysis['presence_percentage'] = (total_objects - analysis['missing_count']) / total_objects
     
     def _is_likely_binary(self, value: str) -> bool:
         """Check if a string value is likely binary data."""
         if not value:
             return False
         
-        # Check for base64 pattern
+        # Skip very short strings - they're unlikely to be binary
+        if len(value) < 20:
+            return False
+        
+        # Check for base64 pattern (must be longer and more specific)
         for pattern in self.binary_patterns:
             if re.match(pattern, value):
                 return True
         
-        # Check for high entropy (lots of different characters)
+        # Check for high entropy (lots of different characters) - but be more conservative
         unique_chars = len(set(value))
-        if len(value) > 20 and unique_chars / len(value) > 0.8:
+        if len(value) > 50 and unique_chars / len(value) > 0.9:
             return True
+        
+        # Additional checks for common non-binary patterns
+        # If it looks like a name, email, URL, etc., it's probably not binary
+        if self._is_email(value) or self._is_url(value) or self._is_date_time(value) or self._is_uuid(value):
+            return False
+        
+        # If it contains spaces or common punctuation, it's probably text
+        if ' ' in value or any(char in value for char in ',.!?;:()[]{}"\''):
+            return False
+        
+        # If it's all lowercase or all uppercase, it's probably text
+        if value.islower() or value.isupper():
+            return False
         
         return False
     
@@ -392,7 +429,10 @@ class SchemaGenerator:
             return self._generate_mixed_type_schema(analysis)
         
         # Handle single types
-        if 'str' in types:
+        if 'NoneType' in types and len(types) == 1:
+            # Field is only null
+            return {"type": "null"}
+        elif 'str' in types:
             return self._generate_string_schema(analysis)
         elif 'int' in types or 'float' in types:
             return self._generate_numeric_schema(analysis)
@@ -410,22 +450,60 @@ class SchemaGenerator:
         """Generate schema for fields with mixed types."""
         type_schemas = []
         
+        # Handle null type separately to avoid nested oneOf
+        has_null = 'NoneType' in analysis['types'] or analysis.get('null_percentage', 0) > 0
+        
         if 'str' in analysis['types']:
-            type_schemas.append(self._generate_string_schema(analysis))
+            str_schema = {"type": "string"}
+            # Add length constraints if available
+            if analysis.get('min_length') is not None:
+                str_schema["minLength"] = analysis['min_length']
+            if analysis.get('max_length') is not None:
+                str_schema["maxLength"] = analysis['max_length']
+            # Add pattern constraints
+            if 'email' in analysis.get('patterns', set()):
+                str_schema["format"] = "email"
+            elif 'url' in analysis.get('patterns', set()):
+                str_schema["format"] = "uri"
+            elif 'datetime' in analysis.get('patterns', set()):
+                str_schema["format"] = "date-time"
+            elif 'uuid' in analysis.get('patterns', set()):
+                str_schema["format"] = "uuid"
+            # Handle binary data
+            if analysis.get('is_binary', False):
+                str_schema["contentEncoding"] = "base64"
+                str_schema["contentMediaType"] = "application/octet-stream"
+            type_schemas.append(str_schema)
+            
         if 'int' in analysis['types'] or 'float' in analysis['types']:
-            # Only add numeric schema if we have valid numeric constraints
-            numeric_schema = self._generate_numeric_schema(analysis)
-            if numeric_schema:
-                type_schemas.append(numeric_schema)
+            if 'float' in analysis['types']:
+                numeric_schema = {"type": "number"}
+            else:
+                numeric_schema = {"type": "integer"}
+            # Add value constraints
+            min_value = analysis.get('min_value')
+            max_value = analysis.get('max_value')
+            if min_value is not None and isinstance(min_value, (int, float)) and not isinstance(min_value, bool):
+                numeric_schema["minimum"] = min_value
+            if max_value is not None and isinstance(max_value, (int, float)) and not isinstance(max_value, bool):
+                numeric_schema["maximum"] = max_value
+            type_schemas.append(numeric_schema)
+            
         if 'bool' in analysis['types']:
             type_schemas.append({"type": "boolean"})
+            
         if 'list' in analysis['types']:
-            type_schemas.append(self._generate_array_schema(analysis))
+            array_schema = {"type": "array", "minItems": 0, "items": {}}
+            type_schemas.append(array_schema)
+            
         if 'dict' in analysis['types']:
-            type_schemas.append(self._generate_object_schema(analysis))
+            type_schemas.append({
+                "type": "object",
+                "additionalProperties": True
+            })
         
         # Add null if it's optional
-        if analysis.get('null_percentage', 0) > 0:
+        if has_null:
             type_schemas.append({"type": "null"})
         
         return {"oneOf": type_schemas}
@@ -443,11 +521,38 @@ class SchemaGenerator:
         
         schema = {"type": "string"}
         
-        # Add length constraints
-        if analysis.get('min_length') is not None:
-            schema["minLength"] = analysis['min_length']
-        if analysis.get('max_length') is not None:
-            schema["maxLength"] = analysis['max_length']
+        # Add flexible length constraints - only set minLength if it's reasonable
+        min_length = analysis.get('min_length')
+        max_length = analysis.get('max_length')
+        
+        # Only set minLength if it's greater than 0 and not too restrictive
+        if min_length is not None and min_length > 0:
+            # For most fields, use a reasonable minimum of 1
+            # Only use the actual minimum for very specific cases like UUIDs
+            if 'uuid' in analysis.get('patterns', set()):
+                schema["minLength"] = min_length  # UUIDs have fixed length
+            elif 'email' in analysis.get('patterns', set()):
+                schema["minLength"] = 5  # Reasonable minimum for emails
+            else:
+                schema["minLength"] = 1  # General minimum for strings
+        
+        # Set maxLength for better validation - use a reasonable maximum
+        if max_length is not None and max_length > 0:
+            # For specific patterns, use exact max length
+            if 'uuid' in analysis.get('patterns', set()):
+                schema["maxLength"] = max_length  # UUIDs have fixed length
+            elif 'credit_card' in analysis.get('patterns', set()):
+                schema["maxLength"] = max_length  # Credit cards have fixed format
+            elif 'email' in analysis.get('patterns', set()):
+                # For emails, use a reasonable maximum (254 chars is RFC standard)
+                schema["maxLength"] = min(max_length * 2, 254)
+            elif 'url' in analysis.get('patterns', set()):
+                # For URLs, use a reasonable maximum
+                schema["maxLength"] = min(max_length * 3, 2048)
+            else:
+                # For other strings, use a reasonable maximum based on observed data
+                # Allow some flexibility but not unlimited
+                schema["maxLength"] = min(max_length * 2, 1000)  # Cap at 1000 chars
         
         # Add pattern constraints
         if 'email' in analysis.get('patterns', set()):
@@ -490,13 +595,36 @@ class SchemaGenerator:
     
     def _generate_array_schema(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Generate schema for array fields."""
+        # Check if field can be null
+        if analysis.get('null_percentage', 0) > 0:
+            return {
+                "oneOf": [
+                    {
+                        "type": "array",
+                        "minItems": 0,  # Allow empty arrays
+                        "items": {}
+                    },
+                    {"type": "null"}
+                ]
+            }
+        
         schema = {"type": "array"}
         
-        # Add length constraints
-        if analysis.get('min_length') is not None:
-            schema["minItems"] = analysis['min_length']
-        if analysis.get('max_length') is not None:
-            schema["maxItems"] = analysis['max_length']
+        # Add flexible length constraints - be more permissive
+        min_length = analysis.get('min_length')
+        max_length = analysis.get('max_length')
+        
+        # Only set minItems if it's reasonable (allow empty arrays)
+        if min_length is not None and min_length > 0:
+            # For most arrays, allow empty arrays (minItems = 0)
+            # Only set specific minItems for very constrained cases
+            if min_length > 5:  # If we consistently see large arrays
+                schema["minItems"] = 0  # Still allow empty arrays for flexibility
+            else:
+                schema["minItems"] = 0  # Default to allowing empty arrays
+        
+        # Don't set maxItems to allow flexibility in array size
+        # Only set it for very specific cases where we know the exact constraint
         
         # For now, allow any items (could be enhanced to analyze array contents)
         schema["items"] = {}
@@ -505,6 +633,18 @@ class SchemaGenerator:
     
     def _generate_object_schema(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Generate schema for object fields."""
+        # Check if field can be null
+        if analysis.get('null_percentage', 0) > 0:
+            return {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": True
+                    },
+                    {"type": "null"}
+                ]
+            }
+        
         return {
             "type": "object",
             "additionalProperties": True
@@ -892,7 +1032,7 @@ class SchemaGenerator:
         Returns:
             Smart hardened JSON schema with intelligent type handling
         """
-        return self.generate_smart_hardened_schema_with_depth(objects, max_depth=100)
+        return self.generate_smart_hardened_schema_with_depth(objects, max_depth=200)
     
     def generate_smart_hardened_schema_with_depth(self, objects: List[Dict[str, Any]], max_depth: int = 100) -> Dict[str, Any]:
         """
@@ -908,8 +1048,8 @@ class SchemaGenerator:
         if not objects:
             raise ValueError("JSON objects list cannot be empty")
         
-        # Analyze fields with deep nested analysis using custom max depth
-        field_analysis = self._analyze_fields_deep_with_depth(objects, max_depth)
+        # Use simple field analysis instead of complex deep analysis
+        field_analysis = self._analyze_fields(objects)
         
         schema = {
             "$schema": "http://json-schema.org/draft-2020-12/schema#",
@@ -939,7 +1079,7 @@ class SchemaGenerator:
         Returns:
             Enhanced field analysis with nested structure information
         """
-        return self._analyze_fields_deep_with_depth(objects, max_depth=100)
+        return self._analyze_fields_deep_with_depth(objects, max_depth=200)
     
     def _analyze_fields_deep_with_depth(self, objects: List[Dict[str, Any]], max_depth: int = 100) -> Dict[str, Dict[str, Any]]:
         """
@@ -968,6 +1108,258 @@ class SchemaGenerator:
                 analysis['is_binary'] = True  # Mark as binary if nested binary is found
         
         return field_analysis
+    
+    def _enhance_deep_analysis(self, field_analysis: Dict[str, Dict[str, Any]], objects: List[Dict[str, Any]], max_depth: int) -> Dict[str, Dict[str, Any]]:
+        """
+        Enhance the deep analysis with additional insights about nested structures.
+        
+        Args:
+            field_analysis: Initial field analysis
+            objects: List of JSON objects
+            max_depth: Maximum depth to analyze
+            
+        Returns:
+            Enhanced field analysis with deeper insights
+        """
+        enhanced_analysis = field_analysis.copy()
+        
+        for field_name, analysis in enhanced_analysis.items():
+            # Analyze nested structures more deeply
+            if 'dict' in analysis['types'] or 'list' in analysis['types']:
+                nested_insights = self._analyze_deep_nested_insights(objects, field_name, max_depth)
+                analysis.update(nested_insights)
+            
+            # Analyze string patterns more deeply (simplified)
+            if 'str' in analysis['types']:
+                # Just add basic string insights without complex analysis
+                string_insights = self._analyze_basic_string_patterns(objects, field_name)
+                analysis.update(string_insights)
+            
+            # Analyze array contents more deeply
+            if 'list' in analysis['types']:
+                array_insights = self._analyze_deep_array_contents(objects, field_name, max_depth)
+                analysis.update(array_insights)
+        
+        return enhanced_analysis
+    
+    def _analyze_deep_nested_insights(self, objects: List[Dict[str, Any]], field_name: str, max_depth: int) -> Dict[str, Any]:
+        """
+        Analyze nested structures for deeper insights.
+        
+        Args:
+            objects: List of JSON objects
+            field_name: Name of the field to analyze
+            max_depth: Maximum depth to analyze
+            
+        Returns:
+            Deep nested insights
+        """
+        insights = {
+            'deep_nested_types': set(),
+            'deep_nested_patterns': set(),
+            'deep_nested_binary_count': 0,
+            'deep_nested_string_lengths': [],
+            'deep_nested_complexity': 0
+        }
+        
+        for obj in objects:
+            if field_name in obj:
+                value = obj[field_name]
+                self._analyze_single_nested_value(value, insights, 0, max_depth)
+        
+        # Calculate complexity score
+        insights['deep_nested_complexity'] = len(insights['deep_nested_types']) + len(insights['deep_nested_patterns'])
+        
+        return insights
+    
+    def _analyze_single_nested_value(self, value: Any, insights: Dict[str, Any], current_depth: int, max_depth: int) -> None:
+        """
+        Analyze a single nested value recursively.
+        
+        Args:
+            value: Value to analyze
+            insights: Insights dictionary to update
+            current_depth: Current depth in the structure
+            max_depth: Maximum depth to analyze
+        """
+        if current_depth >= max_depth:
+            return
+        
+        value_type = type(value).__name__
+        insights['deep_nested_types'].add(value_type)
+        
+        if isinstance(value, str):
+            # Analyze string patterns
+            if self._is_email(value):
+                insights['deep_nested_patterns'].add('email')
+            elif self._is_url(value):
+                insights['deep_nested_patterns'].add('url')
+            elif self._is_date_time(value):
+                insights['deep_nested_patterns'].add('datetime')
+            elif self._is_uuid(value):
+                insights['deep_nested_patterns'].add('uuid')
+            
+            # Track string lengths
+            insights['deep_nested_string_lengths'].append(len(value))
+            
+            # Check for binary
+            if self._is_likely_binary(value):
+                insights['deep_nested_binary_count'] += 1
+                
+        elif isinstance(value, dict):
+            # Recursively analyze dictionary
+            for k, v in value.items():
+                self._analyze_single_nested_value(v, insights, current_depth + 1, max_depth)
+                
+        elif isinstance(value, list):
+            # Recursively analyze list items
+            for item in value:
+                self._analyze_single_nested_value(item, insights, current_depth + 1, max_depth)
+    
+    def _analyze_basic_string_patterns(self, objects: List[Dict[str, Any]], field_name: str) -> Dict[str, Any]:
+        """
+        Analyze string patterns with basic insights (simplified version).
+        
+        Args:
+            objects: List of JSON objects
+            field_name: Name of the field to analyze
+            
+        Returns:
+            Basic string pattern insights
+        """
+        insights = {
+            'string_patterns': set(),
+            'string_length_distribution': []
+        }
+        
+        string_values = []
+        for obj in objects:
+            if field_name in obj and isinstance(obj[field_name], str):
+                string_values.append(obj[field_name])
+        
+        if not string_values:
+            return insights
+        
+        # Analyze patterns
+        for value in string_values:
+            if self._is_email(value):
+                insights['string_patterns'].add('email')
+            elif self._is_url(value):
+                insights['string_patterns'].add('url')
+            elif self._is_date_time(value):
+                insights['string_patterns'].add('datetime')
+            elif self._is_uuid(value):
+                insights['string_patterns'].add('uuid')
+            elif self._is_likely_binary(value):
+                insights['string_patterns'].add('binary')
+            
+            # Track length distribution
+            insights['string_length_distribution'].append(len(value))
+        
+        return insights
+    
+    def _analyze_deep_string_patterns(self, objects: List[Dict[str, Any]], field_name: str) -> Dict[str, Any]:
+        """
+        Analyze string patterns more deeply.
+        
+        Args:
+            objects: List of JSON objects
+            field_name: Name of the field to analyze
+            
+        Returns:
+            Deep string pattern insights
+        """
+        insights = {
+            'string_patterns': set(),
+            'string_length_distribution': [],
+            'string_entropy_scores': [],
+            'string_common_prefixes': set(),
+            'string_common_suffixes': set()
+        }
+        
+        string_values = []
+        for obj in objects:
+            if field_name in obj and isinstance(obj[field_name], str):
+                string_values.append(obj[field_name])
+        
+        if not string_values:
+            return insights
+        
+        # Analyze patterns
+        for value in string_values:
+            if self._is_email(value):
+                insights['string_patterns'].add('email')
+            elif self._is_url(value):
+                insights['string_patterns'].add('url')
+            elif self._is_date_time(value):
+                insights['string_patterns'].add('datetime')
+            elif self._is_uuid(value):
+                insights['string_patterns'].add('uuid')
+            elif self._is_likely_binary(value):
+                insights['string_patterns'].add('binary')
+            
+            # Track length distribution
+            insights['string_length_distribution'].append(len(value))
+            
+            # Calculate entropy (simplified)
+            unique_chars = len(set(value))
+            if len(value) > 0:
+                entropy = unique_chars / len(value)
+                insights['string_entropy_scores'].append(entropy)
+            
+            # Track common prefixes/suffixes (first/last 3 chars)
+            if len(value) >= 3:
+                insights['string_common_prefixes'].add(value[:3])
+                insights['string_common_suffixes'].add(value[-3:])
+        
+        return insights
+    
+    def _analyze_deep_array_contents(self, objects: List[Dict[str, Any]], field_name: str, max_depth: int) -> Dict[str, Any]:
+        """
+        Analyze array contents more deeply.
+        
+        Args:
+            objects: List of JSON objects
+            field_name: Name of the field to analyze
+            max_depth: Maximum depth to analyze
+            
+        Returns:
+            Deep array content insights
+        """
+        insights = {
+            'array_item_types': set(),
+            'array_item_patterns': set(),
+            'array_nested_complexity': 0,
+            'array_consistent_structure': True,
+            'array_max_nested_depth': 0
+        }
+        
+        array_structures = []
+        
+        for obj in objects:
+            if field_name in obj and isinstance(obj[field_name], list):
+                array = obj[field_name]
+                array_structures.append(len(array))
+                
+                for item in array:
+                    item_type = type(item).__name__
+                    insights['array_item_types'].add(item_type)
+                    
+                    # Analyze nested items
+                    if isinstance(item, (dict, list)):
+                        nested_insights = {'deep_nested_types': set(), 'deep_nested_patterns': set()}
+                        self._analyze_single_nested_value(item, nested_insights, 0, max_depth)
+                        insights['array_item_patterns'].update(nested_insights['deep_nested_patterns'])
+                        insights['array_max_nested_depth'] = max(insights['array_max_nested_depth'], 
+                                                               len(nested_insights['deep_nested_types']))
+        
+        # Check if arrays have consistent structure
+        if len(set(array_structures)) > 1:
+            insights['array_consistent_structure'] = False
+        
+        insights['array_nested_complexity'] = len(insights['array_item_types']) + len(insights['array_item_patterns'])
+        
+        return insights
     
     def _analyze_nested_structures(self, objects: List[Dict[str, Any]], field_name: str) -> Dict[str, Any]:
         """
@@ -1084,17 +1476,13 @@ class SchemaGenerator:
         Returns:
             Smart property schema
         """
-        # Handle binary data (including nested)
-        if analysis.get('is_binary', False) or analysis.get('has_nested_binary', False):
+        # Handle binary data
+        if analysis.get('is_binary', False):
             return self._generate_smart_binary_schema(field_name, analysis)
         
         # Handle mixed types with intelligence
         if analysis.get('is_mixed', False) or len(analysis['types']) > 1:
             return self._generate_smart_mixed_schema(field_name, analysis)
-        
-        # Handle nested structures
-        if analysis.get('max_depth', 0) > 0:
-            return self._generate_smart_nested_schema(field_name, analysis)
         
         # Handle single types with enhanced validation
         return self._generate_smart_single_type_schema(field_name, analysis)
@@ -1110,41 +1498,16 @@ class SchemaGenerator:
         Returns:
             Binary-aware schema
         """
-        if analysis.get('has_nested_binary', False):
-            # Nested binary - allow complex structures with binary content
-            return {
-                "oneOf": [
-                    {
-                        "type": "string",
-                        "contentEncoding": "base64",
-                        "contentMediaType": "application/octet-stream",
-                        "pattern": "^[A-Za-z0-9+/]*={0,2}$",
-                        "description": f"Direct binary data for {field_name}"
-                    },
-                    {
-                        "type": "object",
-                        "additionalProperties": True,
-                        "description": f"Object containing binary data for {field_name}"
-                    },
-                    {
-                        "type": "array",
-                        "items": {},
-                        "description": f"Array containing binary data for {field_name}"
-                    }
-                ],
-                "description": f"Binary data field for {field_name} (supports nested structures)"
-            }
-        else:
-            # Direct binary - strict validation
-            return {
-                "type": "string",
-                "contentEncoding": "base64",
-                "contentMediaType": "application/octet-stream",
-                "minLength": 1,
-                "pattern": "^[A-Za-z0-9+/]*={0,2}$",
-                "description": f"Binary data for {field_name} (base64 encoded)",
-                "examples": ["SGVsbG8gV29ybGQ="]
-            }
+        # Direct binary - strict validation
+        return {
+            "type": "string",
+            "contentEncoding": "base64",
+            "contentMediaType": "application/octet-stream",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+            "description": f"Binary data for {field_name} (base64 encoded)",
+            "examples": ["SGVsbG8gV29ybGQ="]
+        }
     
     def _generate_smart_mixed_schema(self, field_name: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1162,6 +1525,21 @@ class SchemaGenerator:
         # Add detected types with enhanced validation
         if 'str' in analysis['types']:
             str_schema = {"type": "string", "minLength": 1}
+            
+            # Add max length constraint for strings (simplified)
+            max_length = analysis.get('max_length')
+            if max_length is not None and max_length > 0:
+                # Use reasonable maximum based on pattern
+                patterns = analysis.get('patterns', set())
+                if 'uuid' in patterns:
+                    str_schema["maxLength"] = max_length
+                elif 'email' in patterns:
+                    str_schema["maxLength"] = min(max_length * 2, 254)
+                elif 'url' in patterns:
+                    str_schema["maxLength"] = min(max_length * 3, 2048)
+                else:
+                    str_schema["maxLength"] = min(max_length * 2, 1000)
+            
             if analysis.get('is_binary', False):
                 str_schema.update({
                     "contentEncoding": "base64",
@@ -1460,7 +1838,7 @@ class SchemaGenerator:
         
         return schema
     
-    def analyze_objects_with_depth(self, objects: List[Dict[str, Any]], max_depth: int = 100) -> Dict[str, Any]:
+    def analyze_objects_with_depth(self, objects: List[Dict[str, Any]], max_depth: int = 200) -> Dict[str, Any]:
         """
         Analyze objects to understand their structure without generating a schema.
         

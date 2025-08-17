@@ -13,18 +13,20 @@ An intelligent rule-based JSON schema generator that analyzes NDJSON data and au
 - 🔐 **Binary Detection**: Automatically detects and properly handles binary data (base64, hex patterns)
 - 📁 **File Upload**: Support for uploading NDJSON files via API
 - 🎯 **Type Preservation**: Maintains type information while allowing flexibility
+- 🔧 **Flexible Length Constraints**: Smart length validation that adapts to varying data sizes
+- 🎛️ **Configurable Strictness**: Choose between strict and flexible validation modes
 
 ## 📋 Schema Types
 
 | Schema Type | Description | Use Case |
 |-------------|-------------|----------|
-| **Smart Hardened** | **Intelligent nested binary detection, mixed types, strict validation** | **Main route for complex data** |
-| **Standard** | Balanced validation with specific types | Production APIs |
+| **Smart Hardened** | **Intelligent nested binary detection, mixed types, flexible validation** | **Main route for complex data** |
+| **Standard** | Balanced validation with flexible length constraints | Production APIs |
 | **Flexible** | Maximum flexibility - allows ANY type for ANY field | Prototyping |
 | **Binary-Aware** | Smart binary detection and handling | Binary-heavy data |
 | **Flexible with Types** | Flexible but preserves detected type information | Type-aware flexibility |
 | **Pydantic Any** | Uses `Any` type for binary/mixed fields (like Pydantic) | Pydantic compatibility |
-| **Hardened Binary** | Ultra-strict binary validation with patterns and examples | Security-critical |
+| **Hardened Binary** | Strict binary validation with flexible length constraints | Security-critical |
 
 ## 🛠️ Installation
 
@@ -93,6 +95,25 @@ hardened_binary = generator.generate_hardened_binary_schema(objects)
 
 print("Schemas generated successfully!")
 ```
+
+## 🔧 Recent Improvements
+
+### Flexible Length Constraints (Latest Update)
+
+The schema generator now produces more flexible schemas that work with varying data lengths:
+
+- **Smart Length Validation**: Only applies strict length constraints for specific patterns (UUIDs, credit cards)
+- **Flexible String Fields**: Most string fields use `minLength: 1` instead of exact lengths
+- **Array Flexibility**: Arrays allow empty arrays (`minItems: 0`) by default
+- **Configurable Strictness**: Choose between strict and flexible validation modes
+
+### API Endpoints
+
+The API now provides multiple endpoints for different use cases:
+
+- **`/api/v1/schemas/smart`**: Smart hardened schema with flexible validation (recommended)
+- **`/api/v1/schemas/flexible`**: Maximum flexibility for prototyping
+- **`/api/v1/analyze`**: Detailed analysis without schema generation
 
 ### API Server
 

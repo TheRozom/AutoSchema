@@ -31,6 +31,7 @@ async def root():
         "description": "Generate JSON schemas from NDJSON data without external LLM",
         "endpoints": {
             "Smart Schema Generation": "/api/v1/schemas/smart",
+            "Flexible Schema Generation": "/api/v1/schemas/flexible",
             "Object Analysis": "/api/v1/analyze"
         },
         "documentation": "/docs"
@@ -39,7 +40,7 @@ async def root():
 @app.post("/api/v1/schemas/smart", response_model=SchemaResponse)
 async def generate_smart_schema(
     file: UploadFile = File(...),
-    max_nested_depth: Optional[int] = 100,
+    max_nested_depth: Optional[int] = 200,  # Increased default depth for deeper analysis
     sample_size: Optional[int] = None
 ):
     """
@@ -67,8 +68,47 @@ async def generate_smart_schema(
             import random
             objects = random.sample(objects, sample_size)
         
-        # Generate smart schema with custom max nested depth
+        # Generate schema using the smart hardened method for better flexibility
         schema = schema_generator.generate_smart_hardened_schema_with_depth(objects, max_nested_depth)
+        
+        # Clean up
+        os.unlink(temp_file_path)
+        
+        return SchemaResponse(schema=schema)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/v1/schemas/flexible", response_model=SchemaResponse)
+async def generate_flexible_schema(
+    file: UploadFile = File(...),
+    sample_size: Optional[int] = None
+):
+    """
+    Generate a flexible JSON schema that allows maximum flexibility for field content.
+    
+    This schema is designed to be very permissive and work with any data:
+    - Allows any content type in fields
+    - No strict length constraints
+    - Supports binary data detection
+    - Maximum flexibility for mixed types
+    - Ideal for data that varies significantly
+    """
+    try:
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.ndjson') as temp_file:
+            content = await file.read()
+            temp_file.write(content.decode('utf-8'))
+            temp_file_path = temp_file.name
+        
+        # Parse and analyze
+        objects = schema_generator.parse_ndjson_file(temp_file_path)
+        
+        if sample_size and len(objects) > sample_size:
+            import random
+            objects = random.sample(objects, sample_size)
+        
+        # Generate flexible schema that allows any content
+        schema = schema_generator.generate_flexible_with_types_schema(objects)
         
         # Clean up
         os.unlink(temp_file_path)
@@ -80,7 +120,7 @@ async def generate_smart_schema(
 @app.post("/api/v1/analyze", response_model=AnalysisResponse)
 async def analyze_objects(
     file: UploadFile = File(...),
-    max_nested_depth: Optional[int] = 100,
+    max_nested_depth: Optional[int] = 200,  # Increased default depth for deeper analysis
     sample_size: Optional[int] = None
 ):
     """
@@ -119,4 +159,4 @@ async def analyze_objects(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9000)
+    uvicorn.run(app, host="0.0.0.0", port=9090)
