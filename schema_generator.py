@@ -297,12 +297,147 @@ class SchemaGenerator:
             analysis['min_length'] = length
         if analysis['max_length'] is None or length > analysis['max_length']:
             analysis['max_length'] = length
+        
+        # Analyze array item types and structure
+        if 'array_structure' not in analysis:
+            analysis['array_structure'] = {
+                'item_types': set(),
+                'item_schemas': {},
+                'consistent_structure': True,
+                'nested_objects': False
+            }
+        
+        # Analyze each item in the array
+        for item in value:
+            item_type = type(item).__name__
+            analysis['array_structure']['item_types'].add(item_type)
+            
+            # If item is an object, analyze its structure
+            if isinstance(item, dict):
+                analysis['array_structure']['nested_objects'] = True
+                
+                # Create a unique key for this object structure
+                item_keys = tuple(sorted(item.keys()))
+                if item_keys not in analysis['array_structure']['item_schemas']:
+                    analysis['array_structure']['item_schemas'][item_keys] = {
+                        'fields': set(),
+                        'field_types': {},
+                        'field_patterns': {},
+                        'field_constraints': {},
+                        'count': 0
+                    }
+                
+                schema_info = analysis['array_structure']['item_schemas'][item_keys]
+                schema_info['count'] += 1
+                
+                # Analyze each field in the object
+                for field_name, field_value in item.items():
+                    schema_info['fields'].add(field_name)
+                    
+                    # Analyze field type
+                    field_type = type(field_value).__name__
+                    if field_name not in schema_info['field_types']:
+                        schema_info['field_types'][field_name] = set()
+                    schema_info['field_types'][field_name].add(field_type)
+                    
+                    # Analyze string patterns
+                    if isinstance(field_value, str):
+                        if field_name not in schema_info['field_patterns']:
+                            schema_info['field_patterns'][field_name] = set()
+                        
+                        if self._is_email(field_value):
+                            schema_info['field_patterns'][field_name].add('email')
+                        elif self._is_url(field_value):
+                            schema_info['field_patterns'][field_name].add('url')
+                        elif self._is_date_time(field_value):
+                            schema_info['field_patterns'][field_name].add('datetime')
+                        elif self._is_uuid(field_value):
+                            schema_info['field_patterns'][field_name].add('uuid')
+                        elif self._is_likely_binary(field_value):
+                            schema_info['field_patterns'][field_name].add('binary')
+                    
+                    # Analyze constraints
+                    if field_name not in schema_info['field_constraints']:
+                        schema_info['field_constraints'][field_name] = {
+                            'min_length': None,
+                            'max_length': None,
+                            'min_value': None,
+                            'max_value': None
+                        }
+                    
+                    constraints = schema_info['field_constraints'][field_name]
+                    
+                    if isinstance(field_value, str):
+                        length = len(field_value)
+                        if constraints['min_length'] is None or length < constraints['min_length']:
+                            constraints['min_length'] = length
+                        if constraints['max_length'] is None or length > constraints['max_length']:
+                            constraints['max_length'] = length
+                    elif isinstance(field_value, (int, float)) and not isinstance(field_value, bool):
+                        if constraints['min_value'] is None or field_value < constraints['min_value']:
+                            constraints['min_value'] = field_value
+                        if constraints['max_value'] is None or field_value > constraints['max_value']:
+                            constraints['max_value'] = field_value
     
     def _analyze_object_field(self, analysis: Dict[str, Any], value: Dict) -> None:
         """Analyze an object field."""
-        # For now, just note that it's an object
-        # Could be extended to analyze nested structure
-        pass
+        # Analyze nested object structure
+        if 'nested_structure' not in analysis:
+            analysis['nested_structure'] = {
+                'fields': set(),
+                'field_types': {},
+                'field_patterns': {},
+                'field_constraints': {}
+            }
+        
+        # Analyze each field in the nested object
+        for field_name, field_value in value.items():
+            analysis['nested_structure']['fields'].add(field_name)
+            
+            # Analyze field type
+            field_type = type(field_value).__name__
+            if field_name not in analysis['nested_structure']['field_types']:
+                analysis['nested_structure']['field_types'][field_name] = set()
+            analysis['nested_structure']['field_types'][field_name].add(field_type)
+            
+            # Analyze string patterns
+            if isinstance(field_value, str):
+                if field_name not in analysis['nested_structure']['field_patterns']:
+                    analysis['nested_structure']['field_patterns'][field_name] = set()
+                
+                if self._is_email(field_value):
+                    analysis['nested_structure']['field_patterns'][field_name].add('email')
+                elif self._is_url(field_value):
+                    analysis['nested_structure']['field_patterns'][field_name].add('url')
+                elif self._is_date_time(field_value):
+                    analysis['nested_structure']['field_patterns'][field_name].add('datetime')
+                elif self._is_uuid(field_value):
+                    analysis['nested_structure']['field_patterns'][field_name].add('uuid')
+                elif self._is_likely_binary(field_value):
+                    analysis['nested_structure']['field_patterns'][field_name].add('binary')
+            
+            # Analyze constraints
+            if field_name not in analysis['nested_structure']['field_constraints']:
+                analysis['nested_structure']['field_constraints'][field_name] = {
+                    'min_length': None,
+                    'max_length': None,
+                    'min_value': None,
+                    'max_value': None
+                }
+            
+            constraints = analysis['nested_structure']['field_constraints'][field_name]
+            
+            if isinstance(field_value, str):
+                length = len(field_value)
+                if constraints['min_length'] is None or length < constraints['min_length']:
+                    constraints['min_length'] = length
+                if constraints['max_length'] is None or length > constraints['max_length']:
+                    constraints['max_length'] = length
+            elif isinstance(field_value, (int, float)) and not isinstance(field_value, bool):
+                if constraints['min_value'] is None or field_value < constraints['min_value']:
+                    constraints['min_value'] = field_value
+                if constraints['max_value'] is None or field_value > constraints['max_value']:
+                    constraints['max_value'] = field_value
     
     def _post_process_field_analysis(self, analysis: Dict[str, Any], total_objects: int) -> None:
         """Post-process field analysis to determine final characteristics."""
@@ -578,14 +713,38 @@ class SchemaGenerator:
         else:
             schema = {"type": "integer"}
         
-        # Add value constraints (only if they are valid numbers and not boolean)
+        # Add smart value constraints with reasonable ranges
         min_value = analysis.get('min_value')
         max_value = analysis.get('max_value')
         
-        if min_value is not None and isinstance(min_value, (int, float)) and not isinstance(min_value, bool):
-            schema["minimum"] = min_value
-        if max_value is not None and isinstance(max_value, (int, float)) and not isinstance(max_value, bool):
-            schema["maximum"] = max_value
+        if min_value is not None and max_value is not None and isinstance(min_value, (int, float)) and isinstance(max_value, (int, float)) and not isinstance(min_value, bool) and not isinstance(max_value, bool):
+            # Use smart ranges instead of exact values
+            if 'float' in analysis['types']:
+                # For floats, use percentage-based expansion
+                if min_value == max_value:
+                    # Single value - use 10% range
+                    range_size = abs(min_value) * 0.1
+                    schema["minimum"] = min_value - range_size
+                    schema["maximum"] = max_value + range_size
+                else:
+                    # Range of values - expand by 20%
+                    range_size = max_value - min_value
+                    expansion = range_size * 0.2
+                    schema["minimum"] = min_value - expansion
+                    schema["maximum"] = max_value + expansion
+            else:
+                # For integers, use reasonable ranges
+                if min_value == max_value:
+                    # Single value - use a small range around it
+                    range_size = max(1, abs(min_value) // 10)
+                    schema["minimum"] = min_value - range_size
+                    schema["maximum"] = max_value + range_size
+                else:
+                    # Range of values - expand it slightly
+                    range_size = max_value - min_value
+                    expansion = max(1, range_size // 4)  # Expand by 25%
+                    schema["minimum"] = min_value - expansion
+                    schema["maximum"] = max_value + expansion
         
         return schema
     
@@ -599,37 +758,114 @@ class SchemaGenerator:
         if analysis.get('null_percentage', 0) > 0:
             return {
                 "oneOf": [
-                    {
-                        "type": "array",
-                        "minItems": 0,  # Allow empty arrays
-                        "items": {}
-                    },
+                    self._generate_nested_array_schema(analysis),
                     {"type": "null"}
                 ]
             }
         
+        return self._generate_nested_array_schema(analysis)
+    
+    def _generate_nested_array_schema(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate schema for array fields with detailed item analysis."""
         schema = {"type": "array"}
         
-        # Add flexible length constraints - be more permissive
+        # Add flexible length constraints
         min_length = analysis.get('min_length')
         max_length = analysis.get('max_length')
         
-        # Only set minItems if it's reasonable (allow empty arrays)
         if min_length is not None and min_length > 0:
-            # For most arrays, allow empty arrays (minItems = 0)
-            # Only set specific minItems for very constrained cases
-            if min_length > 5:  # If we consistently see large arrays
-                schema["minItems"] = 0  # Still allow empty arrays for flexibility
+            schema["minItems"] = 0  # Allow empty arrays for flexibility
+        
+        # Generate items schema based on array structure analysis
+        if 'array_structure' in analysis:
+            array_structure = analysis['array_structure']
+            
+            if array_structure['nested_objects'] and array_structure['item_schemas']:
+                # Array contains objects - generate detailed item schema
+                schema["items"] = self._generate_array_item_schema(array_structure)
             else:
-                schema["minItems"] = 0  # Default to allowing empty arrays
-        
-        # Don't set maxItems to allow flexibility in array size
-        # Only set it for very specific cases where we know the exact constraint
-        
-        # For now, allow any items (could be enhanced to analyze array contents)
-        schema["items"] = {}
+                # Simple array - use basic item schema
+                schema["items"] = self._generate_simple_array_item_schema(array_structure)
+        else:
+            # No structure analysis available - use generic schema
+            schema["items"] = {}
         
         return schema
+    
+    def _generate_array_item_schema(self, array_structure: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate schema for array items when they are objects."""
+        if len(array_structure['item_schemas']) == 1:
+            # All items have the same structure
+            item_schema_info = list(array_structure['item_schemas'].values())[0]
+            return self._generate_array_object_schema(item_schema_info)
+        else:
+            # Multiple different object structures - use oneOf
+            item_schemas = []
+            for item_schema_info in array_structure['item_schemas'].values():
+                item_schemas.append(self._generate_array_object_schema(item_schema_info))
+            return {"oneOf": item_schemas}
+    
+    def _generate_array_object_schema(self, item_schema_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate schema for an object within an array."""
+        schema = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": True
+        }
+        
+        # Generate schemas for each field in the object
+        for field_name in item_schema_info['fields']:
+            field_types = item_schema_info['field_types'].get(field_name, set())
+            field_patterns = item_schema_info['field_patterns'].get(field_name, set())
+            field_constraints = item_schema_info['field_constraints'].get(field_name, {})
+            
+            # Generate schema for this field
+            field_schema = self._generate_nested_field_schema(field_types, field_patterns, field_constraints)
+            schema["properties"][field_name] = field_schema
+        
+        return schema
+    
+    def _generate_simple_array_item_schema(self, array_structure: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate schema for simple array items (strings, numbers, etc.)."""
+        item_types = array_structure['item_types']
+        
+        if len(item_types) == 1:
+            # Single type
+            item_type = list(item_types)[0]
+            if item_type == 'str':
+                return {"type": "string"}
+            elif item_type == 'int':
+                return {"type": "integer"}
+            elif item_type == 'float':
+                return {"type": "number"}
+            elif item_type == 'bool':
+                return {"type": "boolean"}
+            elif item_type == 'dict':
+                return {"type": "object", "additionalProperties": True}
+            elif item_type == 'list':
+                return {"type": "array", "items": {}}
+            else:
+                return {"type": "string"}
+        else:
+            # Multiple types - use oneOf
+            type_schemas = []
+            for item_type in item_types:
+                if item_type == 'str':
+                    type_schemas.append({"type": "string"})
+                elif item_type == 'int':
+                    type_schemas.append({"type": "integer"})
+                elif item_type == 'float':
+                    type_schemas.append({"type": "number"})
+                elif item_type == 'bool':
+                    type_schemas.append({"type": "boolean"})
+                elif item_type == 'dict':
+                    type_schemas.append({"type": "object", "additionalProperties": True})
+                elif item_type == 'list':
+                    type_schemas.append({"type": "array", "items": {}})
+                else:
+                    type_schemas.append({"type": "string"})
+            
+            return {"oneOf": type_schemas}
     
     def _generate_object_schema(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Generate schema for object fields."""
@@ -637,18 +873,170 @@ class SchemaGenerator:
         if analysis.get('null_percentage', 0) > 0:
             return {
                 "oneOf": [
-                    {
-                        "type": "object",
-                        "additionalProperties": True
-                    },
+                    self._generate_nested_object_schema(analysis),
                     {"type": "null"}
                 ]
             }
         
-        return {
+        return self._generate_nested_object_schema(analysis)
+    
+    def _generate_nested_object_schema(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate schema for nested object fields with detailed structure."""
+        if 'nested_structure' not in analysis:
+            return {
+                "type": "object",
+                "additionalProperties": True
+            }
+        
+        nested = analysis['nested_structure']
+        schema = {
             "type": "object",
+            "properties": {},
             "additionalProperties": True
         }
+        
+        # Generate schemas for each field in the nested object
+        for field_name in nested['fields']:
+            field_types = nested['field_types'].get(field_name, set())
+            field_patterns = nested['field_patterns'].get(field_name, set())
+            field_constraints = nested['field_constraints'].get(field_name, {})
+            
+            # Generate schema for this field
+            field_schema = self._generate_nested_field_schema(field_types, field_patterns, field_constraints)
+            schema["properties"][field_name] = field_schema
+        
+        return schema
+    
+    def _generate_nested_field_schema(self, field_types: Set[str], field_patterns: Set[str], field_constraints: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate schema for a nested field."""
+        if len(field_types) == 1:
+            # Single type
+            field_type = list(field_types)[0]
+            if field_type == 'str':
+                return self._generate_nested_string_schema(field_patterns, field_constraints)
+            elif field_type == 'int':
+                return self._generate_nested_numeric_schema('integer', field_constraints)
+            elif field_type == 'float':
+                return self._generate_nested_numeric_schema('number', field_constraints)
+            elif field_type == 'bool':
+                return {"type": "boolean"}
+            elif field_type == 'list':
+                return {"type": "array", "items": {}}
+            elif field_type == 'dict':
+                return {"type": "object", "additionalProperties": True}
+            else:
+                return {"type": "string"}
+        else:
+            # Multiple types - use oneOf
+            type_schemas = []
+            for field_type in field_types:
+                if field_type == 'str':
+                    type_schemas.append(self._generate_nested_string_schema(field_patterns, field_constraints))
+                elif field_type == 'int':
+                    type_schemas.append(self._generate_nested_numeric_schema('integer', field_constraints))
+                elif field_type == 'float':
+                    type_schemas.append(self._generate_nested_numeric_schema('number', field_constraints))
+                elif field_type == 'bool':
+                    type_schemas.append({"type": "boolean"})
+                elif field_type == 'list':
+                    type_schemas.append({"type": "array", "items": {}})
+                elif field_type == 'dict':
+                    type_schemas.append({"type": "object", "additionalProperties": True})
+                else:
+                    type_schemas.append({"type": "string"})
+            
+            return {"oneOf": type_schemas}
+    
+    def _generate_nested_string_schema(self, field_patterns: Set[str], field_constraints: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate schema for nested string fields."""
+        schema = {"type": "string"}
+        
+        # Add smart length constraints with reasonable ranges
+        min_length = field_constraints.get('min_length')
+        max_length = field_constraints.get('max_length')
+        
+        if min_length is not None and max_length is not None and min_length > 0 and max_length > 0:
+            # Use smart ranges instead of exact values
+            if min_length == max_length:
+                # Single length - use a reasonable range
+                if min_length <= 3:
+                    # Very short strings - allow some flexibility
+                    schema["minLength"] = 1
+                    schema["maxLength"] = min_length * 3
+                elif min_length <= 10:
+                    # Short strings - allow moderate flexibility
+                    schema["minLength"] = max(1, min_length - 2)
+                    schema["maxLength"] = min_length * 2
+                else:
+                    # Longer strings - allow percentage-based flexibility
+                    schema["minLength"] = max(1, int(min_length * 0.8))
+                    schema["maxLength"] = int(min_length * 1.5)
+            else:
+                # Range of lengths - expand it slightly
+                range_size = max_length - min_length
+                expansion = max(1, range_size // 3)  # Expand by 33%
+                schema["minLength"] = max(1, min_length - expansion)
+                schema["maxLength"] = max_length + expansion
+        elif min_length is not None and min_length > 0:
+            # Only min length available
+            schema["minLength"] = min_length
+        elif max_length is not None and max_length > 0:
+            # Only max length available
+            schema["maxLength"] = max_length
+        
+        # Add pattern constraints
+        if 'email' in field_patterns:
+            schema["format"] = "email"
+        elif 'url' in field_patterns:
+            schema["format"] = "uri"
+        elif 'datetime' in field_patterns:
+            schema["format"] = "date-time"
+        elif 'uuid' in field_patterns:
+            schema["format"] = "uuid"
+        elif 'binary' in field_patterns:
+            schema["contentEncoding"] = "base64"
+            schema["contentMediaType"] = "application/octet-stream"
+        
+        return schema
+    
+    def _generate_nested_numeric_schema(self, numeric_type: str, field_constraints: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate schema for nested numeric fields."""
+        schema = {"type": numeric_type}
+        
+        # Add smart value constraints with reasonable ranges
+        min_value = field_constraints.get('min_value')
+        max_value = field_constraints.get('max_value')
+        
+        if min_value is not None and max_value is not None and isinstance(min_value, (int, float)) and isinstance(max_value, (int, float)) and not isinstance(min_value, bool) and not isinstance(max_value, bool):
+            # Use smart ranges instead of exact values
+            if numeric_type == 'integer':
+                # For integers, use reasonable ranges
+                if min_value == max_value:
+                    # Single value - use a small range around it
+                    range_size = max(1, abs(min_value) // 10)
+                    schema["minimum"] = min_value - range_size
+                    schema["maximum"] = max_value + range_size
+                else:
+                    # Range of values - expand it slightly
+                    range_size = max_value - min_value
+                    expansion = max(1, range_size // 4)  # Expand by 25%
+                    schema["minimum"] = min_value - expansion
+                    schema["maximum"] = max_value + expansion
+            else:
+                # For floats, use percentage-based expansion
+                if min_value == max_value:
+                    # Single value - use 10% range
+                    range_size = abs(min_value) * 0.1
+                    schema["minimum"] = min_value - range_size
+                    schema["maximum"] = max_value + range_size
+                else:
+                    # Range of values - expand by 20%
+                    range_size = max_value - min_value
+                    expansion = range_size * 0.2
+                    schema["minimum"] = min_value - expansion
+                    schema["maximum"] = max_value + expansion
+        
+        return schema
     
     def _validate_schema(self, schema: Dict[str, Any], data: List[Dict[str, Any]]) -> None:
         """
