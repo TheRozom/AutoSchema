@@ -13,20 +13,24 @@ An intelligent rule-based JSON schema generator that analyzes NDJSON data and au
 - 🔐 **Binary Detection**: Automatically detects and properly handles binary data (base64, hex patterns)
 - 📁 **File Upload**: Support for uploading NDJSON files via API
 - 🎯 **Type Preservation**: Maintains type information while allowing flexibility
-- 🔧 **Flexible Length Constraints**: Smart length validation that adapts to varying data sizes
+- 🔧 **Smart Length Constraints**: Intelligent length validation that adapts to varying data sizes
 - 🎛️ **Configurable Strictness**: Choose between strict and flexible validation modes
+- 🧩 **Deep Nested Analysis**: Analyzes objects within objects and arrays with recursive structure detection
+- 🎯 **Smart AdditionalProperties**: Minimizes unnecessary `additionalProperties` with intelligent analysis
+- 📏 **Smart Range Constraints**: Applies intelligent min/max ranges instead of exact values
+- ⚠️ **Warning System**: Provides clear warnings when `additionalProperties` is needed
 
 ## 📋 Schema Types
 
 | Schema Type | Description | Use Case |
 |-------------|-------------|----------|
 | **Smart Hardened** | **Intelligent nested binary detection, mixed types, flexible validation** | **Main route for complex data** |
-| **Standard** | Balanced validation with flexible length constraints | Production APIs |
+| **Standard** | Balanced validation with smart length constraints | Production APIs |
 | **Flexible** | Maximum flexibility - allows ANY type for ANY field | Prototyping |
 | **Binary-Aware** | Smart binary detection and handling | Binary-heavy data |
 | **Flexible with Types** | Flexible but preserves detected type information | Type-aware flexibility |
 | **Pydantic Any** | Uses `Any` type for binary/mixed fields (like Pydantic) | Pydantic compatibility |
-| **Hardened Binary** | Strict binary validation with flexible length constraints | Security-critical |
+| **Hardened Binary** | Strict binary validation with smart length constraints | Security-critical |
 
 ## 🛠️ Installation
 
@@ -98,7 +102,33 @@ print("Schemas generated successfully!")
 
 ## 🔧 Recent Improvements
 
-### Flexible Length Constraints (Latest Update)
+### 🎯 Smart AdditionalProperties (Latest Update)
+
+The schema generator now intelligently minimizes `additionalProperties` usage:
+
+- **Top-Level Strictness**: Top-level schema **NEVER** allows `additionalProperties: true`
+- **Nested Intelligence**: Nested objects only allow `additionalProperties` when >50% of fields have mixed types
+- **Warning System**: Clear warnings in descriptions when `additionalProperties` is needed
+- **Better Validation**: More precise and restrictive schema generation for better type safety
+
+### 🧩 Deep Nested Analysis
+
+Enhanced analysis of complex nested structures:
+
+- **Object Analysis**: Analyzes objects within objects with detailed field structure
+- **Array Analysis**: Analyzes objects within arrays with item type detection
+- **Recursive Detection**: Detects nested structures at any depth (configurable up to 200 levels)
+- **Smart Constraints**: Applies intelligent min/max ranges for nested fields
+
+### 📏 Smart Range Constraints
+
+Intelligent min/max value handling:
+
+- **Numeric Fields**: Expands ranges by 10-25% instead of using exact values
+- **String Fields**: Applies smart length ranges based on observed patterns
+- **Flexible Validation**: Avoids overly restrictive constraints like `minimum: 45, maximum: 45`
+
+### Flexible Length Constraints
 
 The schema generator now produces more flexible schemas that work with varying data lengths:
 
@@ -181,6 +211,53 @@ curl -X POST "http://localhost:8000/upload/generate-binary-aware" \
 
 ## 📊 Generated Schema Examples
 
+### Smart Hardened Schema (Recommended)
+```json
+{
+  "$schema": "http://json-schema.org/draft-2020-12/schema#",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20
+    },
+    "email": {
+      "type": "string",
+      "format": "email",
+      "minLength": 1,
+      "maxLength": 254
+    },
+    "log": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "properties": {
+          "time": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 15
+          },
+          "event": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 10
+          }
+        }
+      }
+    }
+  },
+  "required": ["id", "name"],
+  "additionalProperties": false
+}
+```
+
 ### Standard Schema
 ```json
 {
@@ -194,15 +271,18 @@ curl -X POST "http://localhost:8000/upload/generate-binary-aware" \
     },
     "name": {
       "type": "string",
-      "minLength": 8,
+      "minLength": 1,
       "maxLength": 14
     },
     "email": {
       "type": "string",
-      "format": "email"
+      "format": "email",
+      "minLength": 1,
+      "maxLength": 254
     }
   },
-  "required": ["id", "name", "email"]
+  "required": ["id", "name", "email"],
+  "additionalProperties": false
 }
 ```
 
@@ -225,7 +305,8 @@ curl -X POST "http://localhost:8000/upload/generate-binary-aware" \
         {"type": "object", "additionalProperties": true, "description": "Object content"}
       ]
     }
-  }
+  },
+  "additionalProperties": false
 }
 ```
 
@@ -256,6 +337,7 @@ The schema generator uses intelligent pattern analysis and doesn't require any c
 - **Binary Detection**: Modify `binary_patterns` in `__init__` method
 - **Pattern Recognition**: Update pattern matching methods like `_is_email`, `_is_url`, etc.
 - **Schema Generation**: Customize schema generation methods for different use cases
+- **Nested Analysis Depth**: Configure `max_depth` parameter for deep nested analysis (default: 200)
 
 ## 🧪 Testing
 
@@ -264,12 +346,30 @@ Run the test suite:
 python test_schema_generator.py
 ```
 
+Additional test files for specific features:
+```bash
+# Test smart additionalProperties behavior
+python test_strict_additional_properties.py
+
+# Test smart range constraints
+python test_smart_ranges.py
+
+# Test nested analysis
+python test_nested_analysis.py
+
+# Test API functionality
+python test_api_complex.py
+```
+
 The tests cover:
 - ✅ Schema generation for different data types
 - ✅ Binary data detection and handling
 - ✅ Pattern recognition (email, URL, UUID, date/time)
 - ✅ Error handling and validation
 - ✅ API endpoint functionality
+- ✅ Smart additionalProperties behavior
+- ✅ Deep nested analysis
+- ✅ Smart range constraints
 
 ## 📁 Project Structure
 
@@ -279,6 +379,10 @@ AutoSchema/
 ├── api.py                # FastAPI web service
 ├── example.py            # Usage examples and demonstrations
 ├── test_schema_generator.py  # Unit tests
+├── test_strict_additional_properties.py  # AdditionalProperties tests
+├── test_smart_ranges.py  # Smart range constraint tests
+├── test_nested_analysis.py  # Nested analysis tests
+├── test_api_complex.py   # API functionality tests
 ├── requirements.txt      # Python dependencies
 ├── README.md            # This file
 └── generated_schemas/   # Output directory for generated schemas
@@ -290,6 +394,7 @@ AutoSchema/
 - **Memory Efficiency**: Use `stream_ndjson()` method for very large files
 - **Caching**: Cache generated schemas for repeated analysis of the same data structure
 - **Validation**: Disable schema validation for faster processing if not needed
+- **Nested Depth**: Adjust `max_depth` parameter based on your data complexity
 
 ## 🤝 Contributing
 
@@ -319,6 +424,12 @@ A: Make sure you have all dependencies installed: `pip install -r requirements.t
 **Q: Large files cause memory issues**
 A: Use the `sample_size` parameter or the `stream_ndjson()` method for memory-efficient processing.
 
+**Q: Schema has too many additionalProperties**
+A: The new smart additionalProperties system minimizes this. Top-level schemas never have additionalProperties, and nested objects only have them when absolutely necessary.
+
+**Q: Min/max constraints are too restrictive**
+A: The smart range system now expands ranges instead of using exact values. For example, a value of 45 becomes a range of 40-50.
+
 ### Getting Help
 
 - Check the API documentation at http://localhost:8000/docs when the server is running
@@ -334,3 +445,5 @@ A: Use the `sample_size` parameter or the `stream_ndjson()` method for memory-ef
 - **Testing**: Create test data that conforms to generated schemas
 - **Data Migration**: Understand data structure changes over time
 - **Binary Data Handling**: Properly handle file uploads and binary content in JSON
+- **Complex Nested Data**: Analyze and validate deeply nested object structures
+- **Mixed Type Handling**: Handle fields that can contain multiple data types
